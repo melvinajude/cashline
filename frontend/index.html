@@ -1608,13 +1608,17 @@ body {
 
     <div class="auth-error" id="authError"></div>
 
-    <!-- Login form -->
+        <!-- Login form -->
     <div id="authLoginForm">
+      <div class="form-group">
+        <label>Email</label>
+        <input type="email" id="authLoginEmail" placeholder="your@email.com">
+      </div>
       <div class="form-group">
         <label>Password</label>
         <input type="password" id="authLoginPwd" placeholder="Enter your password" onkeydown="if(event.key==='Enter')submitLogin()">
       </div>
-      <button class="btn btn-primary" style="width:100%;margin-top:8px;background:linear-gradient(135deg,var(--accent),#26a641)" onclick="submitLogin()">
+      <button class="btn btn-primary" id="authLoginBtn" style="width:100%;margin-top:8px;background:linear-gradient(135deg,var(--accent),#26a641)" onclick="submitLogin()">
         <i class="fas fa-sign-in-alt"></i> Sign In
       </button>
       <p class="auth-divider">New here? <a onclick="switchAuthTab('register')">Create an account</a></p>
@@ -1623,6 +1627,10 @@ body {
     <!-- Register form -->
     <div id="authRegisterForm" style="display:none">
       <div class="form-group">
+        <label>Email</label>
+        <input type="email" id="authRegEmail" placeholder="your@email.com">
+      </div>
+      <div class="form-group">
         <label>Set Password</label>
         <input type="password" id="authRegPwd" placeholder="Choose a password (min 6 chars)">
       </div>
@@ -1630,7 +1638,7 @@ body {
         <label>Confirm Password</label>
         <input type="password" id="authRegConfirm" placeholder="Repeat your password" onkeydown="if(event.key==='Enter')submitRegister()">
       </div>
-      <button class="btn btn-primary" style="width:100%;margin-top:8px;background:linear-gradient(135deg,var(--accent),#26a641)" onclick="submitRegister()">
+      <button class="btn btn-primary" id="authRegisterBtn" style="width:100%;margin-top:8px;background:linear-gradient(135deg,var(--accent),#26a641)" onclick="submitRegister()">
         <i class="fas fa-user-plus"></i> Create Account
       </button>
       <p class="auth-divider">Already have an account? <a onclick="switchAuthTab('login')">Sign in</a></p>
@@ -1946,7 +1954,10 @@ function loadState() {
   } catch(e) { showErrorPage(); }
 }
 function saveState() {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    syncStateToServer(); // also save to MongoDB
+  }
   catch(e) { showAlert('warning','Storage Full','Could not save data.'); }
 }
 
@@ -2006,39 +2017,115 @@ function showAuthError(msg) {
   el.classList.add('visible');
 }
 
-function submitLogin() {
-  const pwd = document.getElementById('authLoginPwd').value;
-  const authData = getAuthData();
-  if (!authData.pwd) {
-    showAuthError('No account found. Please create one first.');
-    switchAuthTab('register');
-    return;
+// ================================================================
+//  AUTH — JWT Backend Connected
+// ================================================================
+async function submitLogin() {
+  const email = document.getElementById('authLoginEmail').value.trim();
+  const pwd   = document.getElementById('authLoginPwd').value;
+  if (!email || !pwd) { showAuthError('Enter email and password.'); return; }
+
+  const btn = document.getElementById('authLoginBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Signing in...';
+
+  try {
+    const res  = await fetch('/api/auth/login', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ email, password: pwd }),
+    });
+    const data = await res.json();
+    if (!res.ok) { showAuthError(data.error || 'Login failed.'); return; }
+
+    localStorage.setItem('cashline_jwt', data.token);
+    await loadUserFromServer();
+    completeAuth();
+  } catch(err) {
+    showAuthError('Server error. Is the backend running?');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fas fa-sign-in-alt"></i> Sign In';
   }
-  // Simple hash comparison (btoa for lightweight client-side check)
-  if (btoa(pwd) !== authData.pwd) {
-    showAuthError('Incorrect password. Please try again.');
-    document.getElementById('authLoginPwd').value = '';
-    return;
-  }
-  completeAuth();
 }
 
-function submitRegister() {
+async function submitRegister() {
+  const email   = document.getElementById('authRegEmail').value.trim();
   const pwd     = document.getElementById('authRegPwd').value;
   const confirm = document.getElementById('authRegConfirm').value;
-  if (pwd.length < 6) {
-    showAuthError('Password must be at least 6 characters.');
-    return;
+
+  if (!email) { showAuthError('Email is required.'); return; }
+  if (pwd.length < 6) { showAuthError('Password must be at least 6 characters.'); return; }
+  if (pwd !== confirm) { showAuthError('Passwords do not match.'); return; }
+
+  const btn = document.getElementById('authRegisterBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Creating...';
+
+  try {
+    const res  = await fetch('/api/auth/register', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ email, password: pwd }),
+    });
+    const data = await res.json();
+    if (!res.ok) { showAuthError(data.error || 'Registration failed.'); return; }
+
+    localStorage.setItem('cashline_jwt', data.token);
+    completeAuth();
+  } catch(err) {
+    showAuthError('Server error. Is the backend running?');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fas fa-user-plus"></i> Create Account';
   }
-  if (pwd !== confirm) {
-    showAuthError('Passwords do not match. Please try again.');
-    document.getElementById('authRegConfirm').value = '';
-    return;
-  }
-  saveAuthData({ pwd: btoa(pwd) });
-  completeAuth();
 }
 
+async function loadUserFromServer() {
+  const token = localStorage.getItem('cashline_jwt');
+  if (!token) return;
+  try {
+    const res  = await fetch('/api/auth/me', {
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    if (!res.ok) return;
+    const user = await res.json();
+    // Merge server state into local state
+    if (user.profile)   state.profile   = user.profile;
+    if (user.name)      state.name      = user.name;
+    if (user.budget)    state.budget    = user.budget;
+    if (user.transactions?.length) state.transactions = user.transactions;
+    if (user.bills?.length)        state.bills        = user.bills;
+    if (user.invoices?.length)     state.invoices     = user.invoices;
+    if (user.exams?.length)        state.exams        = user.exams;
+    if (user.accounts?.length)     state.accounts     = user.accounts;
+    if (user.clients?.length)      state.clients      = user.clients;
+    if (user.emis?.length)         state.emis         = user.emis;
+    if (user.features?.length)     state.features     = user.features;
+    state.hasBills  = user.hasBills  ?? state.hasBills;
+    state.examMode  = user.examMode  ?? state.examMode;
+    saveState();
+  } catch(err) {
+    console.warn('Could not load user from server:', err);
+  }
+}
+
+async function syncStateToServer() {
+  const token = localStorage.getItem('cashline_jwt');
+  if (!token) return;
+  try {
+    await fetch('/api/auth/state', {
+      method:  'PUT',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': 'Bearer ' + token,
+      },
+      body: JSON.stringify(state),
+    });
+  } catch(err) {
+    console.warn('Could not sync to server:', err);
+  }
+}
 function completeAuth() {
   document.getElementById('authOverlay').classList.add('hidden');
   // Now do normal boot
